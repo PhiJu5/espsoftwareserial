@@ -49,7 +49,7 @@ ALWAYS_INLINE_ATTR inline void IRAM_ATTR UARTBase::restoreInterrupts()
 #endif
 }
 
-constexpr uint8_t BYTE_ALL_BITS_SET = ~static_cast<uint8_t>(0);
+constexpr uint16_t BYTE_ALL_BITS_SET = ~static_cast<uint16_t>(0);
 
 UARTBase::UARTBase() {
 }
@@ -90,16 +90,17 @@ void UARTBase::begin(uint32_t baud, Config config,
     m_pduBits = m_dataBits + static_cast<bool>(m_parityMode) + m_stopBits;
     m_bitTicks = (microsToTicks(1000000UL) + baud / 2) / baud;
     m_intTxEnabled = true;
+    m_bit9 = false;
 }
 
 void UARTBase::beginRx(bool hasPullUp, int bufCapacity, int isrBufCapacity) {
     m_rxGPIOHasPullUp = hasPullUp;
     m_rxReg = portInputRegister(digitalPinToPort(m_rxPin));
     m_rxBitMask = digitalPinToBitMask(m_rxPin);
-    m_buffer.reset(new circular_queue<uint8_t>((bufCapacity > 0) ? bufCapacity : 64));
+    m_buffer.reset(new circular_queue<uint16_t>((bufCapacity > 0) ? bufCapacity : 64));
     if (m_parityMode)
     {
-        m_parityBuffer.reset(new circular_queue<uint8_t>((m_buffer->capacity() + 7) / 8));
+        m_parityBuffer.reset(new circular_queue<uint16_t>(((m_buffer->capacity() + 7) / 8) + 1));
         m_parityInPos = m_parityOutPos = 1;
     }
     m_isrBuffer.reset(new circular_queue<uint32_t, UARTBase*>((isrBufCapacity > 0) ?
@@ -217,7 +218,7 @@ int UARTBase::read() {
     return val;
 }
 
-int UARTBase::read(uint8_t* buffer, size_t size) {
+int UARTBase::read(uint16_t* buffer, size_t size) {
     if (!m_rxValid) { return 0; }
     int avail;
     if (0 == (avail = m_buffer->pop_n(buffer, size))) {
@@ -235,6 +236,10 @@ int UARTBase::read(uint8_t* buffer, size_t size) {
 }
 
 size_t UARTBase::readBytes(uint8_t* buffer, size_t size) {
+    return readBytes16(reinterpret_cast<uint16_t*>(buffer), size);
+}
+
+size_t UARTBase::readBytes16(uint16_t* buffer, size_t size) {
     if (!m_rxValid || !size) { return 0; }
     size_t count = 0;
     auto start = millis();
@@ -345,6 +350,15 @@ size_t UARTBase::write(const uint8_t* buffer, size_t size) {
     return write(buffer, size, m_parityMode);
 }
 
+size_t UARTBase::write9bit(uint8_t byte) {
+    size_t ret;
+
+    m_bit9 = true;
+    ret = write(&byte, 1);
+    m_bit9 = false;
+    return ret;
+}
+
 size_t IRAM_ATTR UARTBase::write(const uint8_t* buffer, size_t size, Parity parity) {
     if (m_rxValid) { rxBits(); }
     if (!m_txValid) { return -1; }
@@ -365,7 +379,10 @@ size_t IRAM_ATTR UARTBase::write(const uint8_t* buffer, size_t size, Parity pari
     m_periodDuration = 0;
     m_periodStart = microsToTicks(micros());
     for (size_t cnt = 0; cnt < size; ++cnt) {
-        uint8_t byte = pgm_read_byte(buffer + cnt) & dataMask;
+        uint16_t byte = pgm_read_byte(buffer + cnt) & dataMask;
+        if (m_bit9) {
+           byte |= 0x100;
+        }
         // push LSB start-data-parity-stop bit pattern into uint32_t
         // Stop bits: HIGH
         uint32_t word = ~0UL;
@@ -378,6 +395,9 @@ size_t IRAM_ATTR UARTBase::write(const uint8_t* buffer, size_t size, Parity pari
             case PARITY_EVEN:
                 // from inverted, so use odd parity
                 parityBit = byte;
+                if (m_dataBits == 9) {
+                  parityBit ^= parityBit >> 8;
+                }
                 parityBit ^= parityBit >> 4;
                 parityBit &= 0xf;
                 parityBit = (0x9669 >> parityBit) & 1;
@@ -385,6 +405,9 @@ size_t IRAM_ATTR UARTBase::write(const uint8_t* buffer, size_t size, Parity pari
             case PARITY_ODD:
                 // from inverted, so use even parity
                 parityBit = byte;
+                if (m_dataBits == 9) {
+                  parityBit ^= parityBit >> 8;
+                }
                 parityBit ^= parityBit >> 4;
                 parityBit &= 0xf;
                 parityBit = (0x6996 >> parityBit) & 1;
@@ -508,11 +531,11 @@ void UARTBase::rxBits(const uint32_t isrTick) {
         }
         // data bits
         if (m_rxLastBit < (m_dataBits - 1)) {
-            uint8_t dataBits = min(bits, static_cast<uint32_t>(m_dataBits - 1 - m_rxLastBit));
+            uint16_t dataBits = min(bits, static_cast<uint32_t>(m_dataBits - 1 - m_rxLastBit));
             m_rxLastBit += dataBits;
             bits -= dataBits;
             m_rxCurByte >>= dataBits;
-            if (level) { m_rxCurByte |= (BYTE_ALL_BITS_SET << (8 - dataBits)); }
+            if (level) { m_rxCurByte |= (BYTE_ALL_BITS_SET << (16 - dataBits)); }
             continue;
         }
         // parity bit
@@ -526,7 +549,7 @@ void UARTBase::rxBits(const uint32_t isrTick) {
         // Store the received value in the buffer unless we have an overflow
         // if not high stop bit level, discard word
         if (bits >= static_cast<uint32_t>(m_pduBits - 1 - m_rxLastBit) && level) {
-            m_rxCurByte >>= (sizeof(uint8_t) * 8 - m_dataBits);
+            m_rxCurByte >>= (sizeof(uint16_t) * 8 - m_dataBits);
             if (!m_buffer->push(m_rxCurByte)) {
                 m_overflow = true;
             }

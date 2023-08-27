@@ -60,7 +60,8 @@ public:
     #elif CONFIG_IDF_TARGET_ESP32C3
         // Datasheet https://www.espressif.com/sites/default/files/documentation/esp32-c3_datasheet_en.pdf,
         // Pinout    https://docs.espressif.com/projects/esp-idf/en/latest/esp32c3/_images/esp32-c3-devkitm-1-v1-pinout.jpg
-        return (pin >= 0 && pin <= 1) || (pin >= 3 && pin <= 7) || (pin >= 18 && pin <= 21);
+        // PJU ttgo t-01 esp32-c3 Add IO2 IO8 IO8
+        return (pin >= 0 && pin <= 1) || (pin >= 3 && pin <= 7) || (pin >= 18 && pin <= 21) || (pin == 2) || (pin == 8) || (pin == 9);
     #else
         return pin >= 0;
     #endif
@@ -143,6 +144,7 @@ enum Config {
     SWSERIAL_6O2,
     SWSERIAL_7O2,
     SWSERIAL_8O2,
+    SWSERIAL_9O2,
     SWSERIAL_5M2 = 0200 | PARITY_MARK,
     SWSERIAL_6M2,
     SWSERIAL_7M2,
@@ -223,24 +225,26 @@ public:
         return (0x9669 >> byte) & 1;
     }
     /// The read(buffer, size) functions are non-blocking, the same as readBytes but without timeout
-    int read(uint8_t* buffer, size_t size)
+    int read(uint16_t* buffer, size_t size)
 #if defined(ESP8266)
         override
 #endif
         ;
     /// The read(buffer, size) functions are non-blocking, the same as readBytes but without timeout
     int read(char* buffer, size_t size) {
-        return read(reinterpret_cast<uint8_t*>(buffer), size);
+        return read(reinterpret_cast<uint16_t*>(buffer), size);
     }
     /// @returns The number of bytes read into buffer, up to size. Times out if the limit set through
     ///          Stream::setTimeout() is reached.
     size_t readBytes(uint8_t* buffer, size_t size) override;
+    size_t readBytes16(uint16_t* buffer, size_t size);
     /// @returns The number of bytes read into buffer, up to size. Times out if the limit set through
     ///          Stream::setTimeout() is reached.
     size_t readBytes(char* buffer, size_t size) override {
-        return readBytes(reinterpret_cast<uint8_t*>(buffer), size);
+        return readBytes16(reinterpret_cast<uint16_t*>(buffer), size);
     }
     void flush() override;
+    size_t write9bit(uint8_t byte);
     size_t write(uint8_t byte) override;
     size_t write(uint8_t byte, Parity parity);
     size_t write(const uint8_t* buffer, size_t size) override;
@@ -293,6 +297,7 @@ protected:
     int8_t m_rxPin = -1;
     int8_t m_txPin = -1;
     bool m_invert = false;
+    bool m_bit9 = false;
 
 private:
     // It's legal to exceed the deadline, for instance,
@@ -350,12 +355,12 @@ private:
     bool m_lastReadParity;
     bool m_overflow = false;
     uint32_t m_bitTicks;
-    uint8_t m_parityInPos;
-    uint8_t m_parityOutPos;
-    int8_t m_rxLastBit; // 0 thru (m_pduBits - m_stopBits - 1): data/parity bits. -1: start bit. (m_pduBits - 1): stop bit.
-    uint8_t m_rxCurByte = 0;
-    std::unique_ptr<circular_queue<uint8_t> > m_buffer;
-    std::unique_ptr<circular_queue<uint8_t> > m_parityBuffer;
+    uint16_t m_parityInPos;
+    uint16_t m_parityOutPos;
+    int16_t m_rxLastBit; // 0 thru (m_pduBits - m_stopBits - 1): data/parity bits. -1: start bit. (m_pduBits - 1): stop bit.
+    uint16_t m_rxCurByte = 0;
+    std::unique_ptr<circular_queue<uint16_t> > m_buffer;
+    std::unique_ptr<circular_queue<uint16_t> > m_parityBuffer;
     uint32_t m_periodStart;
     uint32_t m_periodDuration;
 #ifndef ESP32
